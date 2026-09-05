@@ -16,6 +16,15 @@ input[type=text],select,textarea{border:1px solid #C9C0AC;border-radius:5px;padd
 button{padding:5px 10px;border:1px solid #C9C0AC;background:#fff;border-radius:5px;cursor:pointer;color:#24413A}
 button:hover{background:#F2EEE4}
 button.on{background:#24413A;color:#fff;border-color:#24413A}
+.session-controls{display:flex;align-items:center;gap:5px}
+.session-controls input{width:190px}
+.toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);padding:8px 14px;border-radius:5px;background:#24413A;color:#fff;font-size:13px;opacity:0;pointer-events:none;transition:opacity .2s}
+.toast.show{opacity:1}
+.name-gate{position:fixed;inset:0;z-index:10;display:flex;align-items:center;justify-content:center;background:rgba(36,65,58,.28)}
+.name-card{width:min(360px,calc(100% - 32px));padding:24px;background:#FBF8F2;border:2px solid #CFC6B0;border-radius:8px;box-shadow:0 8px 30px rgba(36,65,58,.18)}
+.name-card h2{margin-bottom:6px}
+.name-card p{font-size:13px;line-height:1.45;color:#5C6659;margin:0 0 14px}
+.name-card input{width:100%;margin-bottom:12px}
 main{flex:1;display:flex;min-height:0}
 aside{width:270px;border-right:2px solid #CFC6B0;padding:12px;overflow:auto;background:#FBF8F2}
 aside.right{border-right:none;border-left:2px solid #CFC6B0;width:290px}
@@ -41,7 +50,11 @@ textarea{width:100%;height:60px;resize:vertical}
 <body>
 <header>
   <h1>Sibu Kamek — Stakeholder Mapping</h1>
-  <input type="text" id="sessionName" placeholder="Session name" style="width:150px" disabled>
+  <div class="session-controls">
+    <input type="text" id="sessionName" placeholder="Session code (UUID)" aria-label="Session code">
+    <button id="bJoin">Join</button>
+    <button id="bShare">Share session URL</button>
+  </div>
   <span style="flex:1"></span>
   <button id="mAdd">+ Add</button>
   <button id="mMove" class="on">Position</button>
@@ -69,6 +82,16 @@ textarea{width:100%;height:60px;resize:vertical}
     <p class="hint">All changes are synced live to the group using Supabase Realtime.</p>
   </aside>
 </main>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<div class="name-gate" id="nameGate">
+  <form class="name-card" id="nameForm">
+    <h2>Join the session</h2>
+    <p>Enter your name so other participants can identify your cursor on the map.</p>
+    <label for="userName">Your name</label>
+    <input type="text" id="userName" autocomplete="name" maxlength="60" required>
+    <button type="submit">Continue</button>
+  </form>
+</div>
 <script>
 // Supabase Configuration
 const supabaseUrl = 'https://gktlzckvzpbpteviftwo.supabase.co'; // Replace with actual URL
@@ -90,6 +113,7 @@ const GX0=PAD.l, GY0=PAD.t, GX1=W-PAD.r, GY1=H-PAD.b;
 
 let S={items:[], links:[]}; 
 let mode="move", sel=null, linkFrom=null, sessionId=null;
+let userName=null;
 let hist=[];
 let rtChannel=null, lastMove=0;
 const myCursorId = crypto.randomUUID();
@@ -107,6 +131,11 @@ async function undo(){
 }
 
 function uid(){ return Math.random().toString(36).slice(2,9); }
+function notify(message){
+ const toast=document.getElementById('toast');
+ toast.textContent=message; toast.classList.add('show');
+ clearTimeout(notify.timer); notify.timer=setTimeout(()=>toast.classList.remove('show'),3000);
+}
 
 const el=(t,a={},p=svg)=>{const e=document.createElementNS(NS,t);for(const k in a)e.setAttribute(k,a[k]);if(p)p.appendChild(e);return e;};
 const hidden=new Set();
@@ -243,7 +272,7 @@ svg.addEventListener('pointermove', e => {
  if (now - lastMove > 250 && rtChannel) {
    lastMove = now;
    const cp = pt(e);
-   rtChannel.send({ type: 'broadcast', event: 'cursor', payload: { id: myCursorId, x: cp.x, y: cp.y, color: myColor } });
+   rtChannel.send({ type: 'broadcast', event: 'cursor', payload: { id: myCursorId, name: userName, x: cp.x, y: cp.y, color: myColor } });
  }
 });
 
@@ -312,7 +341,11 @@ function renderPeerCursor(p) {
       'stroke-width': 1.5,
       'stroke-linejoin': 'round'
     }, c);
+    const label=el('text',{x:16,y:18,'font-family':'Georgia,serif','font-size':12,fill:p.color,stroke:'#FBF8F2','stroke-width':3,'paint-order':'stroke'},c);
+    label.textContent=p.name;
   }
+  const label=c.querySelector('text');
+  if(label) label.textContent=p.name;
   c.style.transform = `translate(${p.x}px, ${p.y}px)`;
 }
 
@@ -334,7 +367,7 @@ async function initApp() {
     window.history.replaceState({}, '', '?session=' + sessionId);
   }
   
-  document.getElementById('sessionName').value = sessionId.split('-')[0];
+  document.getElementById('sessionName').value = sessionId;
   
   const { data: st } = await supabaseClient.from('stakeholders').select('*').eq('session_id', sessionId);
   const { data: ln } = await supabaseClient.from('influence_links').select('*').eq('session_id', sessionId);
@@ -368,6 +401,7 @@ async function initApp() {
   });
   
   rtChannel.on('broadcast', { event: 'cursor' }, ({ payload }) => {
+    if(!payload || payload.id===myCursorId || !payload.name) return;
     peers[payload.id] = { ...payload, lastSeen: Date.now() };
     renderPeerCursor(payload);
   });
@@ -386,7 +420,36 @@ async function initApp() {
   }, 2000);
 }
 
-document.addEventListener('DOMContentLoaded', initApp);
+document.getElementById('bShare').onclick = async () => {
+  try {
+    await navigator.clipboard.writeText(window.location.href);
+    notify('Session URL copied to clipboard.');
+  } catch (error) {
+    notify('Unable to copy the session URL. Please copy it from your browser address bar.');
+    console.error('Could not copy session URL:', error);
+  }
+};
+
+document.getElementById('bJoin').onclick = async () => {
+  const code=document.getElementById('sessionName').value.trim();
+  if(!code){notify('Enter a session code to join.');return;}
+  if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(code)){
+    notify('Enter the full session code shown in the session bar.');
+    return;
+  }
+  window.location.href='?session='+encodeURIComponent(code);
+};
+
+document.getElementById('nameForm').onsubmit = e => {
+  e.preventDefault();
+  const name=document.getElementById('userName').value.trim();
+  if(!name)return;
+  userName=name;
+  document.getElementById('nameGate').remove();
+  initApp();
+};
+
+document.addEventListener('DOMContentLoaded', () => document.getElementById('userName').focus());
 </script>
 </body>
 </html>
