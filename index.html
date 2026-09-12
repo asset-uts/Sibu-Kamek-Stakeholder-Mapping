@@ -25,6 +25,22 @@ button.on{background:#24413A;color:#fff;border-color:#24413A}
 .name-card h2{margin-bottom:6px}
 .name-card p{font-size:13px;line-height:1.45;color:#5C6659;margin:0 0 14px}
 .name-card input{width:100%;margin-bottom:12px}
+.auth-screen,.dashboard{position:fixed;inset:0;z-index:20;background:#FBF8F2;overflow:auto;padding:32px}
+.auth-card{max-width:380px;margin:10vh auto;padding:26px;background:#fff;border:2px solid #CFC6B0;border-radius:8px}
+.auth-card h2{margin-bottom:8px}
+.auth-card input{width:100%;margin-bottom:12px}
+.error{color:#A33B2C;font-size:12px;min-height:18px;margin:8px 0}
+.dashboard-inner{max-width:1100px;margin:0 auto}
+.dashboard-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:22px}
+.dashboard-head h1{flex:1}
+.session-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:14px}
+.session-card{padding:16px;background:#fff;border:1px solid #DCD2BE;border-radius:7px}
+.session-card h3{margin:0 0 8px;color:#24413A;font-size:17px}
+.session-meta{font-size:12px;color:#8A8065;margin-bottom:14px}
+.session-card .row{flex-wrap:wrap}
+.session-card button{font-size:12px}
+.file-input{display:none}
+.hidden{display:none!important}
 main{flex:1;display:flex;min-height:0}
 aside{width:270px;border-right:2px solid #CFC6B0;padding:12px;overflow:auto;background:#FBF8F2}
 aside.right{border-right:none;border-left:2px solid #CFC6B0;width:290px}
@@ -64,6 +80,7 @@ textarea{width:100%;height:60px;resize:vertical}
   <button id="bExport">Export JSON</button>
   <button id="bPng">Export PNG</button>
   <button id="bCsv">Export CSV</button>
+  <button id="bSignOut">Sign out</button>
 </header>
 <main>
   <aside>
@@ -82,6 +99,31 @@ textarea{width:100%;height:60px;resize:vertical}
     <p class="hint">All changes are synced live to the group using Supabase Realtime.</p>
   </aside>
 </main>
+<div class="auth-screen" id="authScreen">
+  <form class="auth-card" id="loginForm">
+    <h2>Sign in</h2>
+    <p class="hint">Sign in to access the Sibu Kamek stakeholder mapping tool.</p>
+    <label for="loginEmail">Email</label>
+    <input type="email" id="loginEmail" autocomplete="username" required>
+    <label for="loginPassword">Password</label>
+    <input type="password" id="loginPassword" autocomplete="current-password" required>
+    <div class="error" id="loginError" role="alert"></div>
+    <button type="submit">Sign in</button>
+  </form>
+</div>
+<div class="dashboard hidden" id="dashboard">
+  <div class="dashboard-inner">
+    <div class="dashboard-head">
+      <h1>Stakeholder Mapping Sessions</h1>
+      <button id="newSession">+ New session</button>
+      <button id="importSession">Import from file</button>
+      <button id="dashboardSignOut">Sign out</button>
+      <input class="file-input" type="file" id="importFile" accept=".json,application/json">
+    </div>
+    <div class="error" id="dashboardError" role="alert"></div>
+    <div class="session-grid" id="sessionGrid"></div>
+  </div>
+</div>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 <div class="name-gate" id="nameGate">
   <form class="name-card" id="nameForm">
@@ -89,13 +131,14 @@ textarea{width:100%;height:60px;resize:vertical}
     <p>Enter your name so other participants can identify your cursor on the map.</p>
     <label for="userName">Your name</label>
     <input type="text" id="userName" autocomplete="name" maxlength="60" required>
+    <div class="error" id="nameError" role="alert"></div>
     <button type="submit">Continue</button>
   </form>
 </div>
 <script>
 // Supabase Configuration
 const supabaseUrl = 'https://gktlzckvzpbpteviftwo.supabase.co'; // Replace with actual URL
-const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdrdGx6Y2t2enBicHRldmlmdHdvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc4MTAzNjgsImV4cCI6MjEwMzM4NjM2OH0.xnJKaxjdiTnPQFPATiLNLRryllPat-KL9YXnpadxh9I'; // Replace with actual Anon Key
+const supabaseKey = 'sb_publishable_JY2jvHg7shdpD4Jtt0cNfw_RF5hL-C-'
 const supabaseClient = window.supabase.createClient(supabaseUrl, supabaseKey);
 
 const CATS=[
@@ -116,6 +159,8 @@ let mode="move", sel=null, linkFrom=null, sessionId=null;
 let userName=null;
 let hist=[];
 let rtChannel=null, lastMove=0;
+let appMode='auth';
+let authSubscription=null;
 const myCursorId = crypto.randomUUID();
 const myColor = '#'+Math.floor(Math.random()*16777215).toString(16).padStart(6, '0');
 const peers = {};
@@ -128,6 +173,7 @@ async function undo(){
   document.getElementById('bUndo').disabled = !hist.length;
   const updates = S.items.map(i => ({id: i.id, session_id: sessionId, name: i.name, category: i.cat, x: i.x, y: i.y, note: i.note}));
   await supabaseClient.from('stakeholders').upsert(updates);
+  await touchSession();
 }
 
 function uid(){ return Math.random().toString(36).slice(2,9); }
@@ -135,6 +181,42 @@ function notify(message){
  const toast=document.getElementById('toast');
  toast.textContent=message; toast.classList.add('show');
  clearTimeout(notify.timer); notify.timer=setTimeout(()=>toast.classList.remove('show'),3000);
+}
+function withTimeout(promise, milliseconds){
+  return Promise.race([
+    promise,
+    new Promise((_, reject)=>setTimeout(()=>reject(new Error('Request timed out')),milliseconds))
+  ]);
+}
+async function touchSession(id=sessionId){
+  if(!id)return;
+  const {error}=await supabaseClient.from('sessions').update({updated_at:new Date().toISOString()}).eq('id',id);
+  if(error) console.error('Could not update session timestamp:',error);
+}
+function showMap(){
+  appMode='map';
+  document.getElementById('dashboard').classList.add('hidden');
+  document.getElementById('nameGate').classList.remove('hidden');
+  document.querySelector('header').classList.remove('hidden');
+  document.querySelector('main').classList.remove('hidden');
+}
+function showDashboard(){
+  appMode='dashboard';
+  document.getElementById('authScreen').classList.add('hidden');
+  document.getElementById('nameGate').classList.add('hidden');
+  document.querySelector('header').classList.add('hidden');
+  document.querySelector('main').classList.add('hidden');
+  document.getElementById('dashboard').classList.remove('hidden');
+  loadDashboard();
+}
+function showLogin(){
+  appMode='auth';
+  if(rtChannel){rtChannel.unsubscribe();rtChannel=null;}
+  document.getElementById('authScreen').classList.remove('hidden');
+  document.getElementById('dashboard').classList.add('hidden');
+  document.getElementById('nameGate').classList.add('hidden');
+  document.querySelector('header').classList.add('hidden');
+  document.querySelector('main').classList.add('hidden');
 }
 
 const el=(t,a={},p=svg)=>{const e=document.createElementNS(NS,t);for(const k in a)e.setAttribute(k,a[k]);if(p)p.appendChild(e);return e;};
@@ -170,6 +252,7 @@ function draw(){
     if(mode==='link' || confirm('Remove the influence line from '+A.name+' to '+B.name+'?')){
       snap(); S.links = S.links.filter(x=>x.id!==L.id); draw();
       await supabaseClient.from('influence_links').delete().eq('id', L.id);
+      await touchSession();
     }});
  });
  
@@ -219,9 +302,9 @@ function renderDetail(){
    <button id="dUnplace">Return to list</button></div>
   <div class="row" style="margin-top:6px"><button id="dDel">Delete</button></div>`;
  
- document.getElementById('dName').onchange = async e => { it.name=e.target.value; draw(); await supabaseClient.from('stakeholders').update({name: it.name}).eq('id', it.id); };
- document.getElementById('dCat').onchange = async e => { it.cat=+e.target.value; draw(); await supabaseClient.from('stakeholders').update({category: it.cat}).eq('id', it.id); };
- document.getElementById('dNote').onchange = async e => { it.note=e.target.value; await supabaseClient.from('stakeholders').update({note: it.note}).eq('id', it.id); };
+ document.getElementById('dName').onchange = async e => { it.name=e.target.value; draw(); await supabaseClient.from('stakeholders').update({name: it.name}).eq('id', it.id); await touchSession(); };
+ document.getElementById('dCat').onchange = async e => { it.cat=+e.target.value; draw(); await supabaseClient.from('stakeholders').update({category: it.cat}).eq('id', it.id); await touchSession(); };
+ document.getElementById('dNote').onchange = async e => { it.note=e.target.value; await supabaseClient.from('stakeholders').update({note: it.note}).eq('id', it.id); await touchSession(); };
  
  document.getElementById('dUnplace').onclick = async () => {
    snap(); it.x=it.y=null; 
@@ -229,6 +312,7 @@ function renderDetail(){
    S.links = S.links.filter(l=>l.a!==it.id&&l.b!==it.id); sel=null; draw();
    await supabaseClient.from('stakeholders').update({x: null, y: null}).eq('id', it.id);
    for(const l of lToRemove) await supabaseClient.from('influence_links').delete().eq('id', l.id);
+   await touchSession();
  };
  
  document.getElementById('dDel').onclick = async () => {
@@ -237,6 +321,7 @@ function renderDetail(){
    S.items=S.items.filter(i=>i.id!==it.id); 
    S.links=S.links.filter(l=>l.a!==it.id&&l.b!==it.id); sel=null; draw();
    await supabaseClient.from('stakeholders').delete().eq('id', it.id);
+   await touchSession();
  };
 }
 
@@ -253,6 +338,7 @@ async function onDown(e,it){
      const newLink = {id: crypto.randomUUID(), a: linkFrom, b: it.id};
      S.links.push(newLink); linkFrom=null; draw();
      await supabaseClient.from('influence_links').insert({id: newLink.id, session_id: sessionId, source_id: newLink.a, target_id: newLink.b});
+     await touchSession();
    } 
    return; 
  }
@@ -280,6 +366,7 @@ svg.addEventListener('pointerup', async () => {
   if(drag){
     const d = drag.it; drag=null;
     await supabaseClient.from('stakeholders').update({x: d.x, y: d.y}).eq('id', d.id);
+    await touchSession();
   }
 });
 svg.addEventListener('pointerdown', ()=>{ if(mode!=='link'){sel=null; linkFrom=null; draw();} });
@@ -289,6 +376,7 @@ svg.addEventListener('drop', async e => {
  const it=S.items.find(i=>i.id===id); if(!it) return;
  snap(); const p=clamp(pt(e)); it.x=p.x; it.y=p.y; sel=id; draw();
  await supabaseClient.from('stakeholders').update({x: p.x, y: p.y}).eq('id', id);
+ await touchSession();
 });
 
 function setMode(m){
@@ -308,6 +396,7 @@ document.getElementById('mAdd').onclick = async () => {
  const newItem = {id: uid(), name: n, cat: 0, x: null, y: null, note: ""};
  S.items.push(newItem); draw();
  await supabaseClient.from('stakeholders').insert({ id: newItem.id, session_id: sessionId, name: n, category: 0, note: "" });
+ await touchSession();
 };
 
 document.getElementById('bExport').onclick=()=>dl(new Blob([JSON.stringify(S,null,1)],{type:'application/json'}),'stakeholder-map.json');
@@ -352,25 +441,14 @@ function renderPeerCursor(p) {
 async function initApp() {
   const urlParams = new URLSearchParams(window.location.search);
   sessionId = urlParams.get('session');
-  
-  if (!sessionId) {
-    sessionId = crypto.randomUUID();
-    await supabaseClient.from('sessions').insert({ id: sessionId, name: 'Sibu Kamek Workshop' });
-    
-    const { data: template } = await supabaseClient.from('stakeholders').select('*').eq('session_id', '11111111-1111-1111-1111-111111111111');
-    if (template && template.length > 0) {
-      const cloned = template.map(t => ({
-         id: uid(), session_id: sessionId, name: t.name, category: t.category, x: t.x, y: t.y, note: t.note
-      }));
-      await supabaseClient.from('stakeholders').insert(cloned);
-    }
-    window.history.replaceState({}, '', '?session=' + sessionId);
-  }
+  if(!sessionId){ showDashboard(); return; }
   
   document.getElementById('sessionName').value = sessionId;
   
-  const { data: st } = await supabaseClient.from('stakeholders').select('*').eq('session_id', sessionId);
-  const { data: ln } = await supabaseClient.from('influence_links').select('*').eq('session_id', sessionId);
+  const { data: st, error: stakeholderError } = await supabaseClient.from('stakeholders').select('*').eq('session_id', sessionId);
+  if(stakeholderError) throw stakeholderError;
+  const { data: ln, error: linkError } = await supabaseClient.from('influence_links').select('*').eq('session_id', sessionId);
+  if(linkError) throw linkError;
   
   if (st) S.items = st.map(i => ({id: i.id, name: i.name, cat: i.category, x: i.x, y: i.y, note: i.note}));
   if (ln) S.links = ln.map(l => ({id: l.id, a: l.source_id, b: l.target_id}));
@@ -420,6 +498,115 @@ async function initApp() {
   }, 2000);
 }
 
+function relativeTime(value){
+  if(!value)return 'No edits yet';
+  const seconds=Math.max(0,Math.floor((Date.now()-new Date(value).getTime())/1000));
+  if(seconds<60)return 'Edited just now';
+  if(seconds<3600)return `Edited ${Math.floor(seconds/60)}m ago`;
+  if(seconds<86400)return `Edited ${Math.floor(seconds/3600)}h ago`;
+  return `Edited ${Math.floor(seconds/86400)}d ago`;
+}
+async function cloneSession(sourceId, name){
+  const newId=crypto.randomUUID();
+  const {error: sessionError}=await supabaseClient.from('sessions').insert({id:newId,name,created_at:new Date().toISOString(),updated_at:new Date().toISOString()});
+  if(sessionError)throw sessionError;
+  const {data: sourceItems,error:itemError}=await supabaseClient.from('stakeholders').select('*').eq('session_id',sourceId);
+  if(itemError)throw itemError;
+  const {data: sourceLinks,error:linkError}=await supabaseClient.from('influence_links').select('*').eq('session_id',sourceId);
+  if(linkError)throw linkError;
+  const idMap=new Map();
+  const items=(sourceItems||[]).map(item=>{
+    const id=crypto.randomUUID(); idMap.set(item.id,id);
+    return {id,session_id:newId,name:item.name,category:item.category,x:item.x,y:item.y,note:item.note||''};
+  });
+  if(items.length){
+    const {error}=await supabaseClient.from('stakeholders').insert(items);
+    if(error)throw error;
+  }
+  const links=(sourceLinks||[]).filter(link=>idMap.has(link.source_id)&&idMap.has(link.target_id)).map(link=>({
+    id:crypto.randomUUID(),session_id:newId,source_id:idMap.get(link.source_id),target_id:idMap.get(link.target_id)
+  }));
+  if(links.length){
+    const {error}=await supabaseClient.from('influence_links').insert(links);
+    if(error)throw error;
+  }
+  return newId;
+}
+async function loadDashboard(){
+  const grid=document.getElementById('sessionGrid'), errorBox=document.getElementById('dashboardError');
+  grid.innerHTML='<p class="hint">Loading sessions...</p>'; errorBox.textContent='';
+  const {data:sessions,error}=await supabaseClient.from('sessions').select('id,name,created_at,updated_at').order('updated_at',{ascending:false});
+  if(error){errorBox.textContent='Could not load sessions.'; console.error('Dashboard load failed:',error); return;}
+  const {data:counts,countError}=await supabaseClient.from('stakeholders').select('session_id');
+  if(countError)console.error('Stakeholder counts unavailable:',countError);
+  const countMap={}; (counts||[]).forEach(item=>countMap[item.session_id]=(countMap[item.session_id]||0)+1);
+  grid.innerHTML='';
+  if(!sessions||!sessions.length){grid.innerHTML='<p class="hint">No sessions yet. Create one to get started.</p>';return;}
+  sessions.forEach(session=>{
+    const card=document.createElement('article'); card.className='session-card';
+    card.innerHTML=`<h3></h3><div class="session-meta">${relativeTime(session.updated_at)} · ${countMap[session.id]||0} stakeholders</div>
+      <div class="row"><button data-action="open">Open</button><button data-action="rename">Rename</button><button data-action="duplicate">Duplicate</button><button data-action="copy">Copy share link</button><button data-action="delete">Delete</button></div>`;
+    card.querySelector('h3').textContent=session.name||'Untitled session';
+    card.querySelector('[data-action="open"]').onclick=()=>{window.location.href='?session='+encodeURIComponent(session.id);};
+    card.querySelector('[data-action="copy"]').onclick=async()=>{
+      try{await navigator.clipboard.writeText(new URL('?session='+session.id,window.location.href).href);notify('Session URL copied to clipboard.');}
+      catch(error){notify('Unable to copy the session URL.');console.error('Could not copy session URL:',error);}
+    };
+    card.querySelector('[data-action="rename"]').onclick=async()=>{
+      const name=prompt('Session name',session.name||'');
+      if(name===null||!name.trim())return;
+      const {error}=await supabaseClient.from('sessions').update({name:name.trim(),updated_at:new Date().toISOString()}).eq('id',session.id);
+      if(error){errorBox.textContent='Could not rename the session.';console.error('Rename failed:',error);return;}
+      loadDashboard();
+    };
+    card.querySelector('[data-action="duplicate"]').onclick=async()=>{
+      try{await cloneSession(session.id,`${session.name||'Untitled session'} (copy)`);notify('Session duplicated.');loadDashboard();}
+      catch(error){errorBox.textContent='Could not duplicate the session.';console.error('Duplicate failed:',error);}
+    };
+    card.querySelector('[data-action="delete"]').onclick=async()=>{
+      if(!confirm(`Delete ${session.name||'this session'}? This cannot be undone.`))return;
+      const linkResult=await supabaseClient.from('influence_links').delete().eq('session_id',session.id);
+      const itemResult=await supabaseClient.from('stakeholders').delete().eq('session_id',session.id);
+      const sessionResult=await supabaseClient.from('sessions').delete().eq('id',session.id);
+      const failure=linkResult.error||itemResult.error||sessionResult.error;
+      if(failure){errorBox.textContent='Could not delete the session completely.';console.error('Delete failed:',failure);return;}
+      loadDashboard();
+    };
+    grid.appendChild(card);
+  });
+}
+async function createSession(){
+  const name=prompt('Session name','Sibu Kamek Workshop');
+  if(name===null||!name.trim())return;
+  try{
+    const id=await cloneSession('11111111-1111-1111-1111-111111111111',name.trim());
+    window.location.href='?session='+encodeURIComponent(id);
+  }catch(error){document.getElementById('dashboardError').textContent='Could not create the session.';console.error('Create failed:',error);}
+}
+function validImportedData(value){
+  if(!value||!Array.isArray(value.items)||!Array.isArray(value.links))return false;
+  const ids=new Set();
+  const itemsValid=value.items.every(item=>item&&typeof item.id==='string'&&!ids.has(item.id)&&(ids.add(item.id),true)&&
+    typeof item.name==='string'&&Number.isInteger(item.cat)&&item.cat>=0&&item.cat<CATS.length&&
+    (item.x===null||typeof item.x==='number')&&(item.y===null||typeof item.y==='number')&&
+    (item.note===undefined||typeof item.note==='string'));
+  return itemsValid&&value.links.every(link=>link&&typeof link.a==='string'&&typeof link.b==='string'&&ids.has(link.a)&&ids.has(link.b));
+}
+async function importSessionFile(file){
+  const text=await file.text(), value=JSON.parse(text);
+  if(!validImportedData(value))throw new Error('The JSON must contain valid items and links arrays.');
+  const name=prompt('Name for imported session',file.name.replace(/\.json$/i,'')||'Imported session');
+  if(name===null||!name.trim())return;
+  const newId=crypto.randomUUID(), idMap=new Map();
+  const items=value.items.map(item=>{const id=crypto.randomUUID();if(item.id)idMap.set(item.id,id);return {id,session_id:newId,name:item.name,category:item.cat,x:item.x,y:item.y,note:item.note||''};});
+  const links=value.links.filter(link=>idMap.has(link.a)&&idMap.has(link.b)).map(link=>({id:crypto.randomUUID(),session_id:newId,source_id:idMap.get(link.a),target_id:idMap.get(link.b)}));
+  const sessionResult=await supabaseClient.from('sessions').insert({id:newId,name:name.trim(),created_at:new Date().toISOString(),updated_at:new Date().toISOString()});
+  if(sessionResult.error)throw sessionResult.error;
+  if(items.length){const result=await supabaseClient.from('stakeholders').insert(items);if(result.error)throw result.error;}
+  if(links.length){const result=await supabaseClient.from('influence_links').insert(links);if(result.error)throw result.error;}
+  loadDashboard(); notify('Session imported.');
+}
+
 document.getElementById('bShare').onclick = async () => {
   try {
     await navigator.clipboard.writeText(window.location.href);
@@ -445,11 +632,60 @@ document.getElementById('nameForm').onsubmit = e => {
   const name=document.getElementById('userName').value.trim();
   if(!name)return;
   userName=name;
-  document.getElementById('nameGate').remove();
-  initApp();
+  const form=e.currentTarget;
+  const button=form.querySelector('button[type="submit"]');
+  const errorBox=document.getElementById('nameError');
+  errorBox.textContent='';
+  button.disabled=true;
+  button.textContent='Loading...';
+  withTimeout(initApp(),15000).then(()=>{
+    showMap();
+    document.getElementById('nameGate').classList.add('hidden');
+  }).catch(error=>{
+    button.disabled=false;
+    button.textContent='Continue';
+    errorBox.textContent='Could not load this session. Check your connection, Supabase key, and database permissions.';
+    console.error('Session initialization failed:',error);
+  });
 };
 
-document.addEventListener('DOMContentLoaded', () => document.getElementById('userName').focus());
+document.getElementById('loginForm').onsubmit=async e=>{
+  e.preventDefault();
+  const errorBox=document.getElementById('loginError');
+  errorBox.textContent='';
+  const email=document.getElementById('loginEmail').value.trim();
+  const password=document.getElementById('loginPassword').value;
+  const {error}=await supabaseClient.auth.signInWithPassword({email,password});
+  if(error){errorBox.textContent='Sign in failed. Check your email and password.';console.error('Sign in failed:',error);}
+};
+document.getElementById('newSession').onclick=createSession;
+document.getElementById('importSession').onclick=()=>document.getElementById('importFile').click();
+document.getElementById('importFile').onchange=async e=>{
+  const file=e.target.files[0]; e.target.value='';
+  if(!file)return;
+  try{await importSessionFile(file);}
+  catch(error){document.getElementById('dashboardError').textContent=error.message==='Unexpected end of JSON input'?'The selected file is not valid JSON.':error.message;console.error('Import failed:',error);}
+};
+document.getElementById('bSignOut').onclick=()=>supabaseClient.auth.signOut();
+document.getElementById('dashboardSignOut').onclick=()=>supabaseClient.auth.signOut();
+async function routeAuthenticated(){
+  document.getElementById('authScreen').classList.add('hidden');
+  if(new URLSearchParams(window.location.search).has('session')){
+    showMap();
+    document.getElementById('userName').focus();
+  }else showDashboard();
+}
+async function bootstrapAuth(){
+  showLogin();
+  const {data,error}=await supabaseClient.auth.getSession();
+  if(error){document.getElementById('loginError').textContent='Could not check your sign-in status.';console.error('Auth session check failed:',error);return;}
+  if(data.session)await routeAuthenticated();
+  authSubscription=supabaseClient.auth.onAuthStateChange((event,session)=>{
+    if(session&&(event==='SIGNED_IN'||event==='INITIAL_SESSION')) routeAuthenticated();
+    if(!session&&(event==='SIGNED_OUT'||event==='TOKEN_REFRESHED')) showLogin();
+  });
+}
+bootstrapAuth();
 </script>
 </body>
 </html>
