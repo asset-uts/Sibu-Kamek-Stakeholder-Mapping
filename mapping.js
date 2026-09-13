@@ -5,21 +5,31 @@ const GX0=PAD.l, GY0=PAD.t, GX1=W-PAD.r, GY1=H-PAD.b;
 let S={items:[], links:[]}; 
 let mode="move", sel=null, linkFrom=null, sessionId=null;
 let userName=null;
-let hist=[];
+let hist=[], redoStack=[];
 let rtChannel=null, lastMove=0;
 const myCursorId = crypto.randomUUID();
 const myColor = '#'+Math.floor(Math.random()*16777215).toString(16).padStart(6, '0');
 const peers = {};
 
-function snap(){ hist.push(JSON.stringify(S)); if(hist.length>50)hist.shift(); document.getElementById('bUndo').disabled=false; }
-async function undo(){ 
-  if(!hist.length) return; 
-  S = JSON.parse(hist.pop()); sel=null; linkFrom=null; 
-  draw();
-  document.getElementById('bUndo').disabled = !hist.length;
+function updateHistoryButtons(){document.getElementById('bUndo').disabled=!hist.length;document.getElementById('bRedo').disabled=!redoStack.length;}
+function snap(){ hist.push(JSON.stringify(S)); redoStack=[]; if(hist.length>50)hist.shift(); updateHistoryButtons(); }
+async function restoreSnapshot(snapshot){
+  S=JSON.parse(snapshot);sel=null;linkFrom=null;draw();
   const updates = S.items.map(i => ({id: i.id, session_id: sessionId, name: i.name, category: i.cat, x: i.x, y: i.y, note: i.note}));
   await supabaseClient.from('stakeholders').upsert(updates);
   await touchSession();
+}
+async function undo(){
+  if(!hist.length)return;
+  redoStack.push(JSON.stringify(S));
+  await restoreSnapshot(hist.pop());
+  updateHistoryButtons();
+}
+async function redo(){
+  if(!redoStack.length)return;
+  hist.push(JSON.stringify(S));
+  await restoreSnapshot(redoStack.pop());
+  updateHistoryButtons();
 }
 
 function uid(){ return crypto.randomUUID(); }
@@ -78,7 +88,7 @@ function draw(){
  
  S.items.forEach(it=>{
   if(it.x===null||hidden.has(it.cat))return;
-  const g=el('g',{'data-id':it.id,style:'cursor:pointer'});
+  const g=el('g',{'data-id':it.id,class:'node',style:'cursor:pointer'});
   el('circle',{cx:it.x,cy:it.y,r:sel===it.id?11:8,fill:CATS[it.cat][1],stroke:sel===it.id?'#24413A':'#fff','stroke-width':sel===it.id?3:2},g);
   const t=el('text',{x:it.x+14,y:it.y+4,'font-family':'Georgia,serif','font-size':12.5,fill:'#24413A'},g);
   t.textContent=it.name.length>34?it.name.slice(0,32)+'…':it.name;
@@ -106,9 +116,16 @@ function renderTray(){
  const d=document.getElementById('tray'); d.innerHTML="";
  const u=S.items.filter(i=>i.x===null);
  document.getElementById('unplacedCount').textContent=`(${u.length})`;
- u.forEach(it=>{const r=document.createElement('div');r.className='chip';r.draggable=true;
-  r.innerHTML=`<span class="dot" style="background:${CATS[it.cat][1]}"></span><span>${it.name}</span>`;
+ u.forEach(it=>{const r=document.createElement('div');r.className='chip tray-item';r.draggable=true;
+  r.innerHTML=`<span class="dot" style="background:${CATS[it.cat][1]}"></span><span>${it.name}</span><button class="tray-menu" title="More actions">⋮</button>`;
   r.addEventListener('dragstart',e=>e.dataTransfer.setData('text/plain',it.id));d.appendChild(r);});
+ d.querySelectorAll('.tray-menu').forEach(menu=>menu.onclick=e=>{
+   e.stopPropagation();
+   const id=[...d.children].find(row=>row===e.currentTarget.parentElement)?.querySelector('.dot') ? e.currentTarget.parentElement.dataset.id : null;
+   const target=S.items.find(item=>item.id===id);
+   if(target&&confirm(`Delete ${target.name}?`)){snap();S.items=S.items.filter(item=>item.id!==target.id);S.links=S.links.filter(link=>link.a!==target.id&&link.b!==target.id);draw();supabaseClient.from('stakeholders').delete().eq('id',target.id);supabaseClient.from('influence_links').delete().eq('session_id',sessionId).or(`source_id.eq.${target.id},target_id.eq.${target.id}`);touchSession();}
+ });
+ d.querySelectorAll('.tray-item').forEach((row,index)=>row.dataset.id=u[index].id);
 }
 
 function renderDetail(){
@@ -118,32 +135,12 @@ function renderDetail(){
  d.innerHTML=`<label>Name</label><input type="text" id="dName" value="${it.name.replace(/"/g,'&quot;')}">
   <label>Group</label><select id="dCat">${CATS.map((c,i)=>`<option value="${i}" ${i===it.cat?'selected':''}>${c[0]}</option>`).join('')}</select>
   <label>Notes</label><textarea id="dNote">${it.note||''}</textarea>
-  <div class="row" style="margin-top:10px">
-   <button id="dUnplace">Return to list</button></div>
-  <div class="row" style="margin-top:6px"><button id="dDel">Delete</button></div>`;
+  `;
  
  document.getElementById('dName').onchange = async e => { it.name=e.target.value; draw(); await supabaseClient.from('stakeholders').update({name: it.name}).eq('id', it.id); await touchSession(); };
  document.getElementById('dCat').onchange = async e => { it.cat=+e.target.value; draw(); await supabaseClient.from('stakeholders').update({category: it.cat}).eq('id', it.id); await touchSession(); };
  document.getElementById('dNote').onchange = async e => { it.note=e.target.value; await supabaseClient.from('stakeholders').update({note: it.note}).eq('id', it.id); await touchSession(); };
  
- document.getElementById('dUnplace').onclick = async () => {
-   snap(); it.x=it.y=null; 
-   const lToRemove = S.links.filter(l=>l.a===it.id||l.b===it.id);
-   S.links = S.links.filter(l=>l.a!==it.id&&l.b!==it.id); sel=null; draw();
-   await supabaseClient.from('stakeholders').update({x: null, y: null}).eq('id', it.id);
-   for(const l of lToRemove) await supabaseClient.from('influence_links').delete().eq('id', l.id);
-   await touchSession();
- };
- 
- document.getElementById('dDel').onclick = async () => {
-   if(!confirm('Delete '+it.name+'?')) return;
-   snap();
-   S.items=S.items.filter(i=>i.id!==it.id); 
-   S.links=S.links.filter(l=>l.a!==it.id&&l.b!==it.id); sel=null; draw();
-   await supabaseClient.from('stakeholders').delete().eq('id', it.id);
-   await supabaseClient.from('influence_links').delete().eq('session_id', sessionId).or(`source_id.eq.${it.id},target_id.eq.${it.id}`);
-   await touchSession();
- };
 }
 
 function pt(e){const r=svg.getBoundingClientRect();return{x:(e.clientX-r.left)/r.width*W,y:(e.clientY-r.top)/r.height*H}}
@@ -152,6 +149,7 @@ let drag=null;
 
 async function onDown(e,it){
  e.stopPropagation();
+ e.preventDefault();
  if(mode==='link'){ 
    if(!linkFrom){ linkFrom=it.id; sel=it.id; draw(); } 
    else if(linkFrom!==it.id){
@@ -183,12 +181,28 @@ svg.addEventListener('pointermove', e => {
  }
 });
 
-svg.addEventListener('pointerup', async () => {
-  if(drag){
-    const d = drag.it; drag=null;
-    await supabaseClient.from('stakeholders').update({x: d.x, y: d.y}).eq('id', d.id);
-    await touchSession();
-  }
+async function finishDrag(e){
+ if(!drag)return;
+ const d=drag.it;drag=null;
+ const tray=document.getElementById('tray').getBoundingClientRect();
+ if(e.clientX>=tray.left&&e.clientX<=tray.right&&e.clientY>=tray.top&&e.clientY<=tray.bottom){
+   snap();d.x=d.y=null;sel=null;draw();
+   await supabaseClient.from('stakeholders').update({x:null,y:null}).eq('id',d.id);
+   await touchSession();
+ } else {
+   await supabaseClient.from('stakeholders').update({x:d.x,y:d.y}).eq('id',d.id);
+   await touchSession();
+ }
+}
+svg.addEventListener('pointerup', finishDrag);
+document.addEventListener('pointerup', finishDrag);
+document.addEventListener('keydown',e=>{
+ const tag=e.target.tagName.toLowerCase();
+ if((e.key==='Backspace'||e.key==='Delete')&&!['input','textarea','select'].includes(tag)&&sel){
+   const it=S.items.find(item=>item.id===sel);if(!it||it.x===null)return;
+   e.preventDefault();snap();it.x=it.y=null;sel=null;draw();
+   supabaseClient.from('stakeholders').update({x:null,y:null}).eq('id',it.id);touchSession();
+ }
 });
 svg.addEventListener('pointerdown', ()=>{ if(mode!=='link'){sel=null; linkFrom=null; draw();} });
 svg.addEventListener('dragover', e=>e.preventDefault());
@@ -206,6 +220,7 @@ function setMode(m){
  document.getElementById({move:'mMove',link:'mLink'}[m]).classList.add('on');
 }
 document.getElementById('bUndo').onclick=undo;
+document.getElementById('bRedo').onclick=redo;
 document.addEventListener('keydown',e=>{
   if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'){e.preventDefault();undo();}
   if(e.key==='Escape'&&linkFrom){linkFrom=null;draw();}
@@ -220,22 +235,22 @@ document.getElementById('mAdd').onclick = async () => {
  await touchSession();
 };
 
-document.getElementById('bExport').onclick=()=>dl(new Blob([JSON.stringify(S,null,1)],{type:'application/json'}),'stakeholder-map.json');
-document.getElementById('bCsv').onclick=()=>{
+function exportJson(){dl(new Blob([JSON.stringify(S,null,1)],{type:'application/json'}),'stakeholder-map.json');}
+function exportCsv(){
  const rows=[['Name','Group','Interest 0-100','Power 0-100','Quadrant','Notes']];
  S.items.forEach(i=>{const ix=i.x===null?'':Math.round((i.x-GX0)/(GX1-GX0)*100), ip=i.y===null?'':Math.round((GY1-i.y)/(GY1-GY0)*100);
   let q='';if(i.x!==null){q=(ip>50?'High power':'Low power')+' / '+(ix>50?'high interest':'low interest')}
   rows.push([i.name,CATS[i.cat][0],ix,ip,q,(i.note||'').replace(/\n/g,' ')]);});
  dl(new Blob([rows.map(r=>r.map(c=>`"${String(c).replace(/"/g,'""')}"`).join(',')).join('\n')],{type:'text/csv'}),'stakeholder-map.csv');
-};
-document.getElementById('bPng').onclick=()=>{
+}
+function exportPng(){
  const s=new XMLSerializer().serializeToString(svg);
  const img=new Image(); img.onload=()=>{
   const c=document.createElement('canvas');c.width=W*2;c.height=H*2;
   const x=c.getContext('2d');x.fillStyle='#FBF8F2';x.fillRect(0,0,c.width,c.height);x.drawImage(img,0,0,c.width,c.height);
   c.toBlob(b=>dl(b,'stakeholder-map.png'));};
  img.src='data:image/svg+xml;base64,'+btoa(unescape(encodeURIComponent(s)));
-};
+}
 function dl(blob,name){const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),2000)}
 
 function renderPeerCursor(p) {
@@ -291,6 +306,7 @@ async function initMapping() {
   if (sessionError) throw sessionError;
   sessionIsEphemeral = session.is_ephemeral === true;
   document.getElementById('sessionName').value = session.join_code || sessionId;
+  document.getElementById('sessionTitle').value = session.name || 'New Session';
   const { data: st, error: stakeholderError } = await supabaseClient.from('stakeholders').select('*').eq('session_id', sessionId);
   if (stakeholderError) throw stakeholderError;
   const { data: ln, error: linkError } = await supabaseClient.from('influence_links').select('*').eq('session_id', sessionId);
@@ -325,9 +341,53 @@ async function initMapping() {
 }
 
 document.getElementById('bHome').onclick = async () => { const { data } = await supabaseClient.auth.getSession(); window.location.replace(isAdminSession(data.session) ? 'dashboard.html' : 'index.html'); };
+document.getElementById('sessionTitle').onblur = async e => {
+ const name=e.target.value.trim(); if(!name)return;
+ e.target.value=name;
+ const result=await supabaseClient.from('sessions').update({name,updated_at:new Date().toISOString()}).eq('id',sessionId);
+ if(result.error)notify('Could not rename this session.');
+};
+document.getElementById('sessionTitle').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();e.currentTarget.blur();}};
 document.getElementById('bJoin').onclick = async () => { const value = document.getElementById('sessionName').value.trim(); if (!value) return notify('Enter a session code.'); try { const id = await resolveSessionInput(value); window.location.replace(`mapping.html?session=${encodeURIComponent(id)}`); } catch (error) { notify(error.message); } };
 document.getElementById('bImport').onclick = () => document.getElementById('importFile').click();
-document.getElementById('importFile').onchange = async event => { const file = event.target.files[0]; event.target.value = ''; if (!file) return; try { const name = prompt('Name for imported session', file.name.replace(/\.json$/i, '') || 'Imported session'); if (name === null || !name.trim()) return; const created = await importMapFile(file, name.trim()); window.location.replace(`mapping.html?session=${encodeURIComponent(created.id)}`); } catch (error) { notify(error.message); console.error(error); } };
+let pendingImport=null;
+document.getElementById('importFile').onchange = async event => {
+ const file=event.target.files[0];event.target.value='';if(!file)return;
+ try{
+  const value=JSON.parse(await file.text());
+  if(!Array.isArray(value.items)||!Array.isArray(value.links))throw new Error('The JSON must contain items and links arrays.');
+  pendingImport=value;document.getElementById('importChoice').classList.remove('hidden');
+ }catch(error){notify(error.message);console.error(error);}
+};
+async function applyImport(modeName){
+ const value=pendingImport;if(!value)return;
+ const ids=new Set();
+ for(const item of value.items){if(!item||typeof item.id!=='string'||ids.has(item.id)||typeof item.name!=='string'||!Number.isInteger(item.cat)||item.cat<0||item.cat>=CATS.length||(item.x!==null&&typeof item.x!=='number')||(item.y!==null&&typeof item.y!=='number'))throw new Error('The JSON contains an invalid stakeholder item.');ids.add(item.id);}
+ for(const link of value.links)if(!link||!ids.has(link.a)||!ids.has(link.b))throw new Error('The JSON contains an invalid influence link.');
+ snap();
+ if(modeName==='overwrite'){
+  const links=await supabaseClient.from('influence_links').delete().eq('session_id',sessionId);if(links.error)throw links.error;
+  const items=await supabaseClient.from('stakeholders').delete().eq('session_id',sessionId);if(items.error)throw items.error;
+  S={items:[],links:[]};
+ }
+ const map=new Map(),items=value.items.map(item=>{const id=uuid();map.set(item.id,id);return{id,session_id:sessionId,name:item.name,category:item.cat,x:item.x,y:item.y,note:item.note||''};});
+ if(items.length){const result=await supabaseClient.from('stakeholders').insert(items);if(result.error)throw result.error;}
+ const links=value.links.map(link=>({id:uuid(),session_id:sessionId,source_id:map.get(link.a),target_id:map.get(link.b)}));
+ if(links.length){const result=await supabaseClient.from('influence_links').insert(links);if(result.error)throw result.error;}
+ const importedItems=items.map(item=>({id:item.id,name:item.name,cat:item.category,x:item.x,y:item.y,note:item.note}));
+ const importedLinks=links.map(link=>({id:link.id,a:link.source_id,b:link.target_id}));
+ if(modeName==='overwrite')S={items:importedItems,links:importedLinks};
+ else {S.items.push(...importedItems);S.links.push(...importedLinks);}
+ draw();await touchSession();document.getElementById('importChoice').classList.add('hidden');pendingImport=null;
+}
+document.getElementById('importOverwrite').onclick=()=>applyImport('overwrite').catch(error=>{notify(error.message);console.error(error);});
+document.getElementById('importMerge').onclick=()=>applyImport('merge').catch(error=>{notify(error.message);console.error(error);});
+document.getElementById('importCancel').onclick=()=>{pendingImport=null;document.getElementById('importChoice').classList.add('hidden');};
+document.getElementById('exportOptions').querySelectorAll('button').forEach(button=>button.onclick=()=>{
+ ({json:exportJson,png:exportPng,csv:exportCsv}[button.dataset.export])();
+ document.getElementById('exportOptions').classList.add('hidden');
+});
+document.getElementById('bExport').onclick=e=>{e.stopPropagation();document.getElementById('exportOptions').classList.toggle('hidden');};
 document.getElementById('bShare').onclick = async () => { try { await navigator.clipboard.writeText(shareUrl(sessionId)); notify('Session URL copied to clipboard.'); } catch (error) { notify('Unable to copy the session URL.'); } };
 document.getElementById('nameForm').onsubmit = async event => { event.preventDefault(); const form = event.currentTarget; const name = document.getElementById('userName').value.trim(); const errorBox = document.getElementById('nameError'); if (!name) return; setDisplayName(name); userName = name; form.querySelector('button').disabled = true; try { await initMapping(); document.getElementById('nameGate').classList.add('hidden'); } catch (error) { form.querySelector('button').disabled = false; errorBox.textContent = error.message === 'This session is full.' ? error.message : 'Could not load this session. Check the link and your connection.'; console.error(error); } };
 (async () => {

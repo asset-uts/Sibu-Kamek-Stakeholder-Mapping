@@ -5,7 +5,7 @@ async function routeFromIndex(session) {
 async function createGuestSession() {
   const { data, error } = await supabaseClient.auth.signInAnonymously();
   if (error) throw error;
-  const created = await cloneSession(TEMPLATE_SESSION_ID, 'Guest session', { is_ephemeral: true });
+  const created = await cloneSession(TEMPLATE_SESSION_ID, 'New Session', { is_ephemeral: true });
   window.location.replace(`mapping.html?session=${encodeURIComponent(created.id)}`);
 }
 const form = document.getElementById('loginForm');
