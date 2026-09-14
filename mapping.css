@@ -6,11 +6,18 @@
 .session-title:hover,.session-title:focus{border-color:#C9C0AC;background:#fff;outline:none}
 .left-sidebar{display:flex;flex-direction:column;overflow:hidden}
 .tray-region{flex:1;min-height:0;overflow:auto}
+.tray-toolbar{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+.tray-search-wrap{position:relative;flex:1}
+.tray-search-wrap input{width:100%;padding-right:28px}
+.tray-search-clear{position:absolute;right:4px;top:50%;transform:translateY(-50%);padding:0 5px;border:0;background:transparent;font-size:18px;line-height:1;color:#5C6659}
 .legend-region{flex:0 0 auto;border-top:1px solid #DCD2BE;padding-top:10px;background:#FBF8F2}
 #stage,#tray,.left-sidebar,.node{user-select:none;-webkit-user-select:none}
-.tray-item{position:relative;padding-right:30px}
-.tray-menu{position:absolute;right:5px;top:3px;border:0;background:transparent;font-size:18px;padding:0 4px}
-.tray-delete{position:absolute;right:4px;top:28px;z-index:2}
+.tray-item{position:relative;padding-right:30px;display:flex;align-items:center;gap:8px;min-height:36px}
+.tray-item .dot{flex-shrink:0}
+.tray-item > span:last-of-type{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tray-delete{position:absolute;right:7px;top:50%;transform:translateY(-50%);z-index:2;padding:0 5px;border:0;background:transparent;font-size:18px;line-height:1;color:#A33B2C}
+.tray-delete:hover{background:transparent;color:#7a2d20}
+.empty-state{color:#8A8065;justify-content:center}
 .export-menu{position:relative}
 .export-options{position:absolute;right:0;top:100%;z-index:5;background:#fff;border:1px solid #C9C0AC;border-radius:5px;padding:4px;display:flex;flex-direction:column}
 .export-options button{border:0;text-align:left}

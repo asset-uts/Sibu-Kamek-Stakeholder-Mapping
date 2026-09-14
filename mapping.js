@@ -113,19 +113,27 @@ function renderLegend(){
 }
 
 function renderTray(){
- const d=document.getElementById('tray'); d.innerHTML="";
- const u=S.items.filter(i=>i.x===null);
- document.getElementById('unplacedCount').textContent=`(${u.length})`;
- u.forEach(it=>{const r=document.createElement('div');r.className='chip tray-item';r.draggable=true;
-  r.innerHTML=`<span class="dot" style="background:${CATS[it.cat][1]}"></span><span>${it.name}</span><button class="tray-menu" title="More actions">⋮</button>`;
-  r.addEventListener('dragstart',e=>e.dataTransfer.setData('text/plain',it.id));d.appendChild(r);});
- d.querySelectorAll('.tray-menu').forEach(menu=>menu.onclick=e=>{
-   e.stopPropagation();
-   const id=[...d.children].find(row=>row===e.currentTarget.parentElement)?.querySelector('.dot') ? e.currentTarget.parentElement.dataset.id : null;
-   const target=S.items.find(item=>item.id===id);
-   if(target&&confirm(`Delete ${target.name}?`)){snap();S.items=S.items.filter(item=>item.id!==target.id);S.links=S.links.filter(link=>link.a!==target.id&&link.b!==target.id);draw();supabaseClient.from('stakeholders').delete().eq('id',target.id);supabaseClient.from('influence_links').delete().eq('session_id',sessionId).or(`source_id.eq.${target.id},target_id.eq.${target.id}`);touchSession();}
- });
- d.querySelectorAll('.tray-item').forEach((row,index)=>row.dataset.id=u[index].id);
+ const d=document.getElementById('tray');
+ const searchInput=document.getElementById('traySearch');
+ const clearButton=document.getElementById('traySearchClear');
+ const filterText=(searchInput?.value || '').trim().toLowerCase();
+ const allUnplaced=S.items.filter(i=>i.x===null);
+ const visible=allUnplaced.filter(item=>!filterText || item.name.toLowerCase().includes(filterText));
+ d.innerHTML='';
+ document.getElementById('unplacedCount').textContent=`(${allUnplaced.length})`;
+ if (clearButton) clearButton.classList.toggle('hidden', !searchInput || !searchInput.value.trim());
+ if (!visible.length) {
+   const empty = document.createElement('div');
+   empty.className = 'chip tray-item empty-state';
+   empty.textContent = filterText ? 'No matching stakeholders' : 'No unplaced stakeholders';
+   d.appendChild(empty);
+   return;
+ }
+ visible.forEach(it=>{const r=document.createElement('div');r.className='chip tray-item';r.draggable=true; r.dataset.id=it.id;
+  r.innerHTML=`<span class="dot" style="background:${CATS[it.cat][1]}"></span><span>${it.name}</span><button class="tray-delete" type="button" title="Delete stakeholder" aria-label="Delete ${it.name}">×</button>`;
+  r.addEventListener('dragstart',e=>e.dataTransfer.setData('text/plain',it.id));
+  r.querySelector('.tray-delete').onclick=e=>{e.stopPropagation(); const target=S.items.find(item=>item.id===it.id); if(!target||!confirm(`Delete ${target.name}?`)) return; snap(); S.items=S.items.filter(item=>item.id!==target.id); S.links=S.links.filter(link=>link.a!==target.id&&link.b!==target.id); draw(); supabaseClient.from('stakeholders').delete().eq('id',target.id); supabaseClient.from('influence_links').delete().eq('session_id',sessionId).or(`source_id.eq.${target.id},target_id.eq.${target.id}`); touchSession();};
+  d.appendChild(r);});
 }
 
 function renderDetail(){
@@ -197,12 +205,13 @@ async function finishDrag(e){
 svg.addEventListener('pointerup', finishDrag);
 document.addEventListener('pointerup', finishDrag);
 document.addEventListener('keydown',e=>{
- const tag=e.target.tagName.toLowerCase();
- if((e.key==='Backspace'||e.key==='Delete')&&!['input','textarea','select'].includes(tag)&&sel){
-   const it=S.items.find(item=>item.id===sel);if(!it||it.x===null)return;
-   e.preventDefault();snap();it.x=it.y=null;sel=null;draw();
-   supabaseClient.from('stakeholders').update({x:null,y:null}).eq('id',it.id);touchSession();
- }
+  const tag=(e.target&&e.target.tagName ? e.target.tagName.toLowerCase() : '');
+  if((e.key==='Backspace'||e.key==='Delete') && !e.repeat && !['input','textarea','select'].includes(tag) && sel){
+    const it=S.items.find(item=>item.id===sel); if(!it||it.x===null) return;
+    e.preventDefault();
+    snap(); it.x=it.y=null; sel=null; draw();
+    supabaseClient.from('stakeholders').update({x:null,y:null}).eq('id',it.id); touchSession();
+  }
 });
 svg.addEventListener('pointerdown', ()=>{ if(mode!=='link'){sel=null; linkFrom=null; draw();} });
 svg.addEventListener('dragover', e=>e.preventDefault());
@@ -279,9 +288,11 @@ let currentAuthSession = null;
 let sessionIsEphemeral = false;
 let cleanupTimer = null;
 let channelJoined = false;
+let guestHeartbeatTimer = null;
 
 async function removeEphemeralSession() {
   if (!sessionIsEphemeral || !sessionId) return;
+  stopGuestHeartbeat();
   const links = await supabaseClient.from('influence_links').delete().eq('session_id', sessionId);
   const items = await supabaseClient.from('stakeholders').delete().eq('session_id', sessionId);
   const session = await supabaseClient.from('sessions').delete().eq('id', sessionId).eq('is_ephemeral', true);
@@ -297,14 +308,24 @@ function scheduleEphemeralCleanup() {
   }, 45000);
 }
 function cancelEphemeralCleanup() { if (cleanupTimer) { clearTimeout(cleanupTimer); cleanupTimer = null; } }
+function stopGuestHeartbeat() { if (guestHeartbeatTimer) { clearInterval(guestHeartbeatTimer); guestHeartbeatTimer = null; } }
+function startGuestHeartbeat() {
+  if (!sessionIsEphemeral || guestHeartbeatTimer) return;
+  const heartbeat = () => {
+    const now = new Date();
+    supabaseClient.from('sessions').update({ updated_at: now.toISOString(), expires_at: new Date(now.getTime() + 2 * 60 * 1000).toISOString() }).eq('id', sessionId).eq('is_ephemeral', true).then(({ error }) => { if (error) console.error('Could not update guest session heartbeat:', error); });
+  };
+  heartbeat();
+  guestHeartbeatTimer = setInterval(heartbeat, 30000);
+}
 async function initMapping() {
   const params = new URLSearchParams(window.location.search);
   const raw = params.get('session') || params.get('code');
   if (!raw) { window.location.replace(isAdminSession(currentAuthSession) ? 'dashboard.html' : 'index.html'); return; }
   sessionId = await resolveSessionInput(raw);
-  const { data: session, error: sessionError } = await supabaseClient.from('sessions').select('id,name,join_code,is_ephemeral').eq('id', sessionId).single();
+  const { data: session, error: sessionError } = await supabaseClient.from('sessions').select('id,name,join_code,is_ephemeral,creator_type').eq('id', sessionId).single();
   if (sessionError) throw sessionError;
-  sessionIsEphemeral = session.is_ephemeral === true;
+  sessionIsEphemeral = session.creator_type === 'guest' || session.is_ephemeral === true;
   document.getElementById('sessionName').value = session.join_code || sessionId;
   document.getElementById('sessionTitle').value = session.name || 'New Session';
   const { data: st, error: stakeholderError } = await supabaseClient.from('stakeholders').select('*').eq('session_id', sessionId);
@@ -336,6 +357,7 @@ async function initMapping() {
   const status = await new Promise(resolve => { rtChannel.subscribe(async value => { if (value === 'SUBSCRIBED') { const state = rtChannel.presenceState(); const count = Object.values(state).reduce((total, entries) => total + entries.length, 0); if (count >= 8) { rtChannel.unsubscribe(); resolve('FULL'); return; } await rtChannel.track({ name: userName, color: myColor }); channelJoined = true; resolve('OK'); } else if (value === 'CHANNEL_ERROR' || value === 'TIMED_OUT') resolve('ERROR'); }); });
   if (status === 'FULL') throw new Error('This session is full.');
   if (status !== 'OK') throw new Error('Could not connect to the live session.');
+  startGuestHeartbeat();
   draw();
   setInterval(() => { const now = Date.now(); Object.keys(peers).forEach(id => { if (now - peers[id].lastSeen > 5000) { document.getElementById(`cursor-${id}`)?.remove(); delete peers[id]; } }); }, 2000);
 }
@@ -389,7 +411,7 @@ document.getElementById('exportOptions').querySelectorAll('button').forEach(butt
 });
 document.getElementById('bExport').onclick=e=>{e.stopPropagation();document.getElementById('exportOptions').classList.toggle('hidden');};
 document.getElementById('bShare').onclick = async () => { try { await navigator.clipboard.writeText(shareUrl(sessionId)); notify('Session URL copied to clipboard.'); } catch (error) { notify('Unable to copy the session URL.'); } };
-document.getElementById('nameForm').onsubmit = async event => { event.preventDefault(); const form = event.currentTarget; const name = document.getElementById('userName').value.trim(); const errorBox = document.getElementById('nameError'); if (!name) return; setDisplayName(name); userName = name; form.querySelector('button').disabled = true; try { await initMapping(); document.getElementById('nameGate').classList.add('hidden'); } catch (error) { form.querySelector('button').disabled = false; errorBox.textContent = error.message === 'This session is full.' ? error.message : 'Could not load this session. Check the link and your connection.'; console.error(error); } };
+document.getElementById('nameForm').onsubmit = async event => { event.preventDefault(); const form = event.currentTarget; const name = document.getElementById('userName').value.trim(); const errorBox = document.getElementById('nameError'); if (!name) return; setDisplayName(name); userName = name; form.querySelector('button').disabled = true; try { await initMapping(); await ensureParticipantName(sessionId, name); document.getElementById('nameGate').classList.add('hidden'); } catch (error) { form.querySelector('button').disabled = false; errorBox.textContent = error.message === 'This session is full.' ? error.message : 'Could not load this session. Check the link and your connection.'; console.error(error); } };
 (async () => {
   const params = new URLSearchParams(window.location.search); const hasTarget = params.has('session') || params.has('code');
   const result = await supabaseClient.auth.getSession(); currentAuthSession = result.data.session;
@@ -397,5 +419,6 @@ document.getElementById('nameForm').onsubmit = async event => { event.preventDef
   if (!currentAuthSession) { window.location.replace('index.html'); return; }
   if (!hasTarget) { window.location.replace(isAdminSession(currentAuthSession) ? 'dashboard.html' : 'index.html'); return; }
   userName = getDisplayName(); document.getElementById('userName').value = userName; document.getElementById('nameGate').classList.remove('hidden');
+  const traySearch = document.getElementById('traySearch'); const traySearchClear = document.getElementById('traySearchClear'); if (traySearch) { traySearch.addEventListener('input', renderTray); traySearchClear?.addEventListener('click', () => { traySearch.value=''; renderTray(); traySearch.focus(); }); }
   supabaseClient.auth.onAuthStateChange((event, session) => { if (!session) window.location.replace('index.html'); else currentAuthSession = session; });
 })();

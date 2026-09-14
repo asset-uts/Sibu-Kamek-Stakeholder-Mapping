@@ -47,9 +47,9 @@ function downloadBlob(blob, name) {
 async function withTimeout(promise, milliseconds) {
   return Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error('Request timed out')), milliseconds))]);
 }
-async function insertSessionWithJoinCode({ id = uuid(), name, is_ephemeral = false } = {}) {
+async function insertSessionWithJoinCode({ id = uuid(), name, is_ephemeral = false, creator_type = is_ephemeral ? 'guest' : 'admin', expires_at = null } = {}) {
   for (let attempt = 0; attempt < 5; attempt += 1) {
-    const row = { id, name, is_ephemeral, join_code: randomJoinCode(), created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+    const row = { id, name, is_ephemeral, creator_type, expires_at, join_code: randomJoinCode(), created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
     const { data, error } = await supabaseClient.from('sessions').insert(row).select().single();
     if (!error) return data || row;
     if (!String(error.code || '').includes('23505') && !/duplicate|unique/i.test(error.message || '')) throw error;
@@ -61,8 +61,26 @@ async function touchSession(sessionId) {
   const { error } = await supabaseClient.from('sessions').update({ updated_at: new Date().toISOString() }).eq('id', sessionId);
   if (error) console.error('Could not update session timestamp:', error);
 }
+async function ensureParticipantName(sessionId, name) {
+  const trimmed = String(name || '').trim();
+  if (!sessionId || !trimmed) return null;
+  const { data, error } = await supabaseClient.from('sessions').select('participant_names').eq('id', sessionId).maybeSingle();
+  if (error) throw error;
+  const current = Array.isArray(data?.participant_names) ? data.participant_names : [];
+  if (current.includes(trimmed)) return current;
+  const next = [...current, trimmed];
+  const { error: updateError } = await supabaseClient.from('sessions').update({ participant_names: next }).eq('id', sessionId);
+  if (updateError) throw updateError;
+  return next;
+}
 async function cloneSession(sourceId, name, options = {}) {
-  const created = await insertSessionWithJoinCode({ name, is_ephemeral: options.is_ephemeral === true });
+  const isEphemeral = options.is_ephemeral === true;
+  const created = await insertSessionWithJoinCode({
+    name,
+    is_ephemeral: isEphemeral,
+    creator_type: options.creator_type || (isEphemeral ? 'guest' : 'admin'),
+    expires_at: options.expires_at || (isEphemeral ? new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString() : null)
+  });
   const { data: sourceItems, error: itemError } = await supabaseClient.from('stakeholders').select('*').eq('session_id', sourceId);
   if (itemError) throw itemError;
   const { data: sourceLinks, error: linkError } = await supabaseClient.from('influence_links').select('*').eq('session_id', sourceId);
